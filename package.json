@@ -1,0 +1,22 @@
+{
+  "name": "indoor-air-quality-monitor",
+  "version": "1.0.0",
+  "description": "室内空气质量监测系统 - Electron + Python后端",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "start-backend": "python backend/app.py",
+    "start-simulator": "python sensor_simulator.py",
+    "dev": "concurrently \"npm run start-backend\" \"npm run start\""
+  },
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "echarts": "^5.4.3",
+    "paho-mqtt": "^1.1.0"
+  }
+}

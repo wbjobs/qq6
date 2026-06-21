@@ -1,0 +1,471 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>室内空气质量监测系统</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+      color: #fff;
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+
+    .header {
+      background: rgba(0, 0, 0, 0.3);
+      padding: 15px 30px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+    }
+
+    .header h1 {
+      font-size: 22px;
+      font-weight: 600;
+      letter-spacing: 1px;
+    }
+
+    .header .status {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+    }
+
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #f44336;
+      animation: pulse 2s infinite;
+    }
+
+    .status-dot.connected {
+      background: #4caf50;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .time-display {
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .main-container {
+      display: grid;
+      grid-template-columns: 1fr 380px;
+      gap: 20px;
+      padding: 20px;
+      height: calc(100vh - 70px);
+    }
+
+    .left-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .controls {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      padding: 15px 20px;
+      display: flex;
+      gap: 15px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .control-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .control-group label {
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    select, button {
+      background: rgba(255, 255, 255, 0.15);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      color: #fff;
+      padding: 8px 15px;
+      border-radius: 6px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.3s;
+      outline: none;
+    }
+
+    select:hover, button:hover {
+      background: rgba(255, 255, 255, 0.25);
+      border-color: rgba(255, 255, 255, 0.4);
+    }
+
+    select option {
+      background: #2a5298;
+      color: #fff;
+    }
+
+    button.primary {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border: none;
+    }
+
+    button.primary:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+    }
+
+    button.danger {
+      background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+      border: none;
+    }
+
+    .chart-container {
+      flex: 1;
+      background: rgba(255, 255, 255, 0.08);
+      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      padding: 20px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    #mainChart {
+      width: 100%;
+      height: 100%;
+    }
+
+    .chart-overlay {
+      position: absolute;
+      pointer-events: none;
+    }
+
+    .right-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      overflow-y: auto;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border-radius: 12px;
+      padding: 20px;
+    }
+
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 15px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.15);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .card-title::before {
+      content: '';
+      width: 4px;
+      height: 16px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 2px;
+    }
+
+    .sensor-list {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      max-height: 280px;
+      overflow-y: auto;
+    }
+
+    .sensor-item {
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 8px;
+      padding: 12px 15px;
+      transition: all 0.3s;
+      cursor: pointer;
+    }
+
+    .sensor-item:hover {
+      background: rgba(255, 255, 255, 0.15);
+      transform: translateX(3px);
+    }
+
+    .sensor-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .sensor-name {
+      font-weight: 600;
+      font-size: 13px;
+    }
+
+    .sensor-coord {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.6);
+    }
+
+    .sensor-readings {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 6px;
+    }
+
+    .reading {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.7);
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .reading-value {
+      font-weight: 600;
+      color: #fff;
+    }
+
+    .reading-value.warn {
+      color: #ffc107;
+    }
+
+    .reading-value.danger {
+      color: #f44336;
+    }
+
+    .value-display {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 8px;
+      padding: 15px;
+    }
+
+    .value-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .value-item:last-child {
+      border-bottom: none;
+    }
+
+    .value-label {
+      font-size: 13px;
+      color: rgba(255, 255, 255, 0.7);
+    }
+
+    .value-num {
+      font-size: 18px;
+      font-weight: 700;
+    }
+
+    .value-unit {
+      font-size: 11px;
+      color: rgba(255, 255, 255, 0.5);
+      margin-left: 3px;
+    }
+
+    .legend {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12px;
+    }
+
+    .legend-color {
+      width: 20px;
+      height: 16px;
+      border-radius: 3px;
+    }
+
+    .alert-panel {
+      max-height: 150px;
+      overflow-y: auto;
+    }
+
+    .alert-item {
+      background: rgba(244, 67, 54, 0.15);
+      border-left: 3px solid #f44336;
+      border-radius: 4px;
+      padding: 8px 12px;
+      margin-bottom: 6px;
+      font-size: 12px;
+    }
+
+    .alert-item.warning {
+      background: rgba(255, 193, 7, 0.15);
+      border-left-color: #ffc107;
+    }
+
+    .alert-time {
+      color: rgba(255, 255, 255, 0.5);
+      font-size: 10px;
+      margin-top: 3px;
+    }
+
+    ::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 3px;
+    }
+
+    ::-webkit-scrollbar-thumb:hover {
+      background: rgba(255, 255, 255, 0.3);
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>🏠 室内空气质量监测系统</h1>
+    <div class="status">
+      <div class="status-item">
+        <div class="status-dot" id="backendStatus"></div>
+        <span id="backendStatusText">后端连接中...</span>
+      </div>
+      <div class="status-item">
+        <div class="status-dot" id="simulatorStatus"></div>
+        <span id="simulatorStatusText">模拟器未启动</span>
+      </div>
+      <div class="time-display" id="timeDisplay"></div>
+    </div>
+  </div>
+
+  <div class="main-container">
+    <div class="left-panel">
+      <div class="controls">
+        <div class="control-group">
+          <label>污染物类型:</label>
+          <select id="metricSelect">
+            <option value="pm25">PM2.5 (μg/m³)</option>
+            <option value="co2">CO₂ (ppm)</option>
+            <option value="temperature">温度 (°C)</option>
+            <option value="humidity">湿度 (%)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>插值精度:</label>
+          <select id="resolutionSelect">
+            <option value="20">低 (20×20)</option>
+            <option value="40" selected>中 (40×40)</option>
+            <option value="60">高 (60×60)</option>
+            <option value="80">极高 (80×80)</option>
+          </select>
+        </div>
+        <div class="control-group">
+          <label>刷新间隔:</label>
+          <select id="refreshSelect">
+            <option value="1000">1秒</option>
+            <option value="3000" selected>3秒</option>
+            <option value="5000">5秒</option>
+            <option value="10000">10秒</option>
+          </select>
+        </div>
+        <button class="primary" id="refreshBtn">🔄 立即刷新</button>
+        <button class="primary" id="startSimBtn">▶ 启动模拟</button>
+        <button class="danger" id="stopSimBtn">⏹ 停止模拟</button>
+        <button id="clearBtn">🧹 清除数据</button>
+      </div>
+
+      <div class="chart-container">
+        <div id="mainChart"></div>
+      </div>
+    </div>
+
+    <div class="right-panel">
+      <div class="card">
+        <div class="card-title">📡 传感器列表</div>
+        <div class="sensor-list" id="sensorList">
+          <div style="color:rgba(255,255,255,0.5);text-align:center;padding:20px;">
+            暂无传感器数据，请启动模拟器
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">📍 点击位置数值</div>
+        <div class="value-display" id="clickValueDisplay">
+          <div class="value-item">
+            <span class="value-label">位置坐标</span>
+            <span class="value-num" style="font-size:14px;">-</span>
+          </div>
+          <div class="value-item">
+            <span class="value-label">PM2.5</span>
+            <span class="value-num">-<span class="value-unit">μg/m³</span></span>
+          </div>
+          <div class="value-item">
+            <span class="value-label">CO₂</span>
+            <span class="value-num">-<span class="value-unit">ppm</span></span>
+          </div>
+          <div class="value-item">
+            <span class="value-label">温度</span>
+            <span class="value-num">-<span class="value-unit">°C</span></span>
+          </div>
+          <div class="value-item">
+            <span class="value-label">湿度</span>
+            <span class="value-num">-<span class="value-unit">%</span></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🎨 图例说明</div>
+        <div class="legend" id="legend"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">⚠️ 告警信息</div>
+        <div class="alert-panel" id="alertPanel">
+          <div style="color:rgba(255,255,255,0.5);text-align:center;padding:10px;font-size:12px;">
+            暂无告警
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="./node_modules/echarts/dist/echarts.min.js"></script>
+  <script src="./renderer.js"></script>
+</body>
+</html>
