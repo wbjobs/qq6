@@ -332,9 +332,146 @@
     }
 
     .alert-time {
-      color: rgba(255, 255, 255, 0.5);
+      color: rgba(255,255,255,0.5);
       font-size: 10px;
       margin-top: 3px;
+    }
+
+    .rule-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    .rule-item {
+      background: rgba(255,255,255,0.06);
+      border-radius: 6px;
+      padding: 10px 12px;
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .rule-info {
+      flex: 1;
+    }
+
+    .rule-name {
+      font-weight: 600;
+      margin-bottom: 4px;
+      font-size: 12.5px;
+    }
+
+    .rule-cond {
+      color: rgba(255,255,255,0.7);
+      font-size: 11px;
+    }
+
+    .rule-toggle {
+      width: 36px;
+      height: 20px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 10px;
+      position: relative;
+      cursor: pointer;
+      transition: background 0.3s;
+      margin: 0 6px;
+    }
+
+    .rule-toggle.on {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+
+    .rule-toggle::after {
+      content: '';
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 16px;
+      height: 16px;
+      background: #fff;
+      border-radius: 50%;
+      transition: left 0.3s;
+    }
+
+    .rule-toggle.on::after {
+      left: 18px;
+    }
+
+    .rule-delete {
+      background: rgba(244,67,54,0.2);
+      color: #f44336;
+      border: none;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 11px;
+      cursor: pointer;
+    }
+
+    .rule-delete:hover {
+      background: rgba(244,67,54,0.35);
+    }
+
+    .rule-form {
+      background: rgba(255,255,255,0.05);
+      border-radius: 6px;
+      padding: 10px;
+      margin-top: 10px;
+    }
+
+    .rule-form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-bottom: 6px;
+    }
+
+    .rule-form-row input,
+    .rule-form-row select {
+      background: rgba(255,255,255,0.1);
+      border: 1px solid rgba(255,255,255,0.2);
+      color: #fff;
+      padding: 5px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      outline: none;
+    }
+
+    .rule-form-full {
+      grid-column: 1 / -1;
+    }
+
+    .rule-form button {
+      width: 100%;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border: none;
+      padding: 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      margin-top: 4px;
+    }
+
+    .source-info {
+      background: rgba(255,193,7,0.1);
+      border: 1px solid rgba(255,193,7,0.3);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+
+    .source-info-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      padding: 3px 0;
+      color: rgba(255,255,255,0.8);
+    }
+
+    .source-info-row strong {
+      color: #ffc107;
     }
 
     ::-webkit-scrollbar {
@@ -452,6 +589,45 @@
       <div class="card">
         <div class="card-title">🎨 图例说明</div>
         <div class="legend" id="legend"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🎯 污染源溯源</div>
+        <div id="sourceTracePanel">
+          <div style="color:rgba(255,255,255,0.5);text-align:center;padding:10px;font-size:12px;">
+            启动模拟器后将自动显示推测污染源
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🔔 报警规则</div>
+        <div class="rule-list" id="ruleList"></div>
+        <div class="rule-form" id="ruleForm">
+          <div class="rule-form-row">
+            <input type="text" id="ruleName" placeholder="规则名称（如：PM2.5超标）">
+            <select id="ruleMetric">
+              <option value="pm25">PM2.5</option>
+              <option value="co2">CO₂</option>
+              <option value="temperature">温度</option>
+              <option value="humidity">湿度</option>
+            </select>
+          </div>
+          <div class="rule-form-row">
+            <select id="ruleOp">
+              <option value=">">大于 ></option>
+              <option value="<">小于 <</option>
+              <option value=">=">大于等于 ≥</option>
+              <option value="<=">小于等于 ≤</option>
+              <option value="==">等于 =</option>
+            </select>
+            <input type="number" id="ruleThreshold" placeholder="阈值" step="0.1">
+          </div>
+          <div class="rule-form-row">
+            <input type="number" id="ruleCount" placeholder="连续次数" value="3" min="1" max="10">
+          </div>
+          <button id="addRuleBtn">➕ 添加规则</button>
+        </div>
       </div>
 
       <div class="card">

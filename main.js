@@ -1,12 +1,46 @@
-const { app, BrowserWindow, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, Notification } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 let mainWindow;
 let backendProcess;
 const BACKEND_PORT = 8000;
 const BACKEND_URL = `http://localhost:${BACKEND_PORT}`;
+const SCREENSHOT_DIR = path.join(os.homedir(), 'AirQualityScreenshots');
+
+try {
+  if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true });
+} catch (e) { console.warn('创建截图目录失败', e); }
+
+if (process.platform === 'win32') {
+  app.setAppUserModelId('com.airquality.monitor');
+}
+
+function showNotification(title, body) {
+  if (!Notification.isSupported()) {
+    console.log(`[通知] ${title}: ${body}`);
+    return;
+  }
+  try {
+    const notification = new Notification({
+      title: title,
+      body: body,
+      silent: false,
+      urgency: 'critical'
+    });
+    notification.show();
+    notification.on('click', () => {
+      if (mainWindow) {
+        if (mainWindow.isMinimized()) mainWindow.restore();
+        mainWindow.focus();
+      }
+    });
+  } catch (e) {
+    console.error('显示通知失败', e);
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -154,6 +188,17 @@ ipcMain.handle('restart-backend', async () => {
   } catch (error) {
     return { success: false, error: error.message };
   }
+});
+
+ipcMain.handle('show-notification', (event, payload) => {
+  if (payload && payload.title) {
+    showNotification(payload.title, payload.body || '');
+  }
+  return { success: true };
+});
+
+ipcMain.handle('get-screenshot-dir', () => {
+  return SCREENSHOT_DIR;
 });
 
 process.on('SIGINT', () => {

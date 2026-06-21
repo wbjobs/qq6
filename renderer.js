@@ -1,4 +1,6 @@
 const { ipcRenderer } = require('electron');
+const path = require('path');
+const fs = require('fs');
 
 let chart;
 let backendUrl = 'http://localhost:8000';
@@ -8,9 +10,15 @@ let currentResolution = 40;
 let sensorData = {};
 let latestInterpolation = null;
 let alerts = [];
+let alertRules = [];
+let latestSource = null;
+let notifiedEvents = new Set();
 
 const ROOM_WIDTH = 20;
 const ROOM_HEIGHT = 20;
+const SCREENSHOT_DIR = path.join(require('os').homedir(), 'AirQualityScreenshots');
+
+try { if (!fs.existsSync(SCREENSHOT_DIR)) fs.mkdirSync(SCREENSHOT_DIR, { recursive: true }); } catch(e) { console.warn('无法创建截图目录', e); }
 
 const metricConfig = {
   pm25: { name: 'PM2.5', unit: 'μg/m³', min: 0, max: 150, color: '#ff6b6b', scaleMin: 0, scaleMax: 500 },
@@ -42,11 +50,14 @@ async function init() {
 
   initChart();
   bindEvents();
+  await fetchAlertRules();
   startAutoRefresh();
   updateTime();
   setInterval(updateTime, 1000);
   checkBackendStatus();
   setInterval(checkBackendStatus, 5000);
+  setInterval(fetchAlertRules, 30000);
+  setInterval(checkAndHandleAlerts, 5000);
 }
 
 function updateTime() {
@@ -142,6 +153,7 @@ function bindEvents() {
       sensorData = {};
       latestInterpolation = null;
       alerts = [];
+      notifiedEvents.clear();
       updateSensorList();
       updateAlerts();
       chart.clear();
@@ -150,6 +162,159 @@ function bindEvents() {
       console.error('清除失败', e);
     }
   });
+
+  document.getElementById('addRuleBtn').addEventListener('click', addAlertRule);
+}
+
+async function addAlertRule() {
+  const name = document.getElementById('ruleName').value.trim();
+  const metric = document.getElementById('ruleMetric').value;
+  const op = document.getElementById('ruleOp').value;
+  const threshold = parseFloat(document.getElementById('ruleThreshold').value);
+  const count = parseInt(document.getElementById('ruleCount').value) || 3;
+
+  if (!name || isNaN(threshold)) {
+    alert('请填写规则名称和有效阈值');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${backendUrl}/alerts/rules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, metric, operator: op, threshold, consecutive_count: count, enabled: true })
+    });
+    if (res.ok) {
+      document.getElementById('ruleName').value = '';
+      document.getElementById('ruleThreshold').value = '';
+      await fetchAlertRules();
+    }
+  } catch (e) {
+    console.error('添加规则失败', e);
+  }
+}
+
+async function fetchAlertRules() {
+  try {
+    const res = await fetch(`${backendUrl}/alerts/rules`);
+    if (res.ok) {
+      const data = await res.json();
+      alertRules = data.rules;
+      renderAlertRules();
+    }
+  } catch (e) {
+    console.error('获取规则失败', e);
+  }
+}
+
+function renderAlertRules() {
+  const list = document.getElementById('ruleList');
+  if (alertRules.length === 0) {
+    list.innerHTML = `<div style="color:rgba(255,255,255,0.5);text-align:center;padding:10px;font-size:12px;">暂无报警规则</div>`;
+    return;
+  }
+
+  const metricNames = { pm25: 'PM2.5', co2: 'CO₂', temperature: '温度', humidity: '湿度' };
+  const unit = { pm25: 'μg/m³', co2: 'ppm', temperature: '°C', humidity: '%' };
+
+  list.innerHTML = alertRules.map(r => `
+    <div class="rule-item" data-id="${r.id}">
+      <div class="rule-info">
+        <div class="rule-name">${r.name}</div>
+        <div class="rule-cond">${metricNames[r.metric]} ${r.operator} ${r.threshold} ${unit[r.metric]} · 连续${r.consecutive_count}次</div>
+      </div>
+      <div class="rule-toggle ${r.enabled ? 'on' : ''}" onclick="toggleRule('${r.id}')" title="启用/禁用"></div>
+      <button class="rule-delete" onclick="deleteRule('${r.id}')">删除</button>
+    </div>
+  `).join('');
+}
+
+window.toggleRule = async function(id) {
+  const rule = alertRules.find(r => r.id === id);
+  if (!rule) return;
+  try {
+    await fetch(`${backendUrl}/alerts/rules/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...rule, enabled: !rule.enabled })
+    });
+    await fetchAlertRules();
+  } catch (e) { console.error(e); }
+};
+
+window.deleteRule = async function(id) {
+  if (!confirm('确定删除此规则？')) return;
+  try {
+    await fetch(`${backendUrl}/alerts/rules/${id}`, { method: 'DELETE' });
+    await fetchAlertRules();
+  } catch (e) { console.error(e); }
+};
+
+async function checkAndHandleAlerts() {
+  try {
+    const res = await fetch(`${backendUrl}/alerts/check`);
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.triggered && data.triggered.length > 0) {
+      for (const evt of data.triggered) {
+        const key = `${evt.rule_id}_${evt.sensor_id}_${evt.timestamp}`;
+        if (notifiedEvents.has(key)) continue;
+        notifiedEvents.add(key);
+        handleAlertEvent(evt);
+      }
+    }
+  } catch (e) {
+    console.error('检查告警失败', e);
+  }
+}
+
+function handleAlertEvent(evt) {
+  const metricNames = { pm25: 'PM2.5', co2: 'CO₂', temperature: '温度', humidity: '湿度' };
+  const unit = { pm25: 'μg/m³', co2: 'ppm', temperature: '°C', humidity: '%' };
+
+  const title = `⚠️ ${evt.rule_name}`;
+  const body = `${evt.sensor_name}: ${metricNames[evt.metric]}=${evt.actual_value.toFixed(1)}${unit[evt.metric]}，已连续${evt.consecutive_hits}次超过阈值 ${evt.threshold}${unit[evt.metric]}`;
+
+  try {
+    if (ipcRenderer) {
+      ipcRenderer.invoke('show-notification', { title, body });
+    }
+  } catch (e) { console.error('通知失败', e); }
+
+  alerts.unshift({
+    type: 'danger',
+    text: body,
+    time: new Date().toLocaleTimeString('zh-CN', { hour12: false })
+  });
+  if (alerts.length > 20) alerts = alerts.slice(0, 20);
+  updateAlerts();
+
+  try {
+    captureAndSaveHeatmap(evt);
+  } catch (e) { console.error('截图失败', e); }
+}
+
+function captureAndSaveHeatmap(evt) {
+  if (!chart) return;
+  const metricNames = { pm25: 'PM2.5', co2: 'CO2', temperature: 'Temp', humidity: 'Hum' };
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const filename = `alert_${metricNames[evt.metric]}_${evt.sensor_id}_${timestamp}.png`;
+  const fullPath = path.join(SCREENSHOT_DIR, filename);
+
+  try {
+    const dataUrl = chart.getDataURL({
+      type: 'png',
+      pixelRatio: 2,
+      backgroundColor: '#1e3c72'
+    });
+    const base64Data = dataUrl.replace(/^data:image\/png;base64,/, '');
+    fs.writeFile(fullPath, base64Data, 'base64', (err) => {
+      if (err) console.error('保存截图失败', err);
+      else console.log('截图已保存:', fullPath);
+    });
+  } catch (e) {
+    console.error('生成截图失败', e);
+  }
 }
 
 function updateSimulatorStatus(running) {
@@ -171,10 +336,49 @@ function startAutoRefresh() {
 
 async function refreshData() {
   try {
-    await Promise.all([fetchSensors(), fetchInterpolation(), fetchSimulatorStatus()]);
+    await Promise.all([fetchSensors(), fetchInterpolation(), fetchSimulatorStatus(), fetchSourceTrace()]);
   } catch (e) {
     console.error('刷新数据失败:', e);
   }
+}
+
+async function fetchSourceTrace() {
+  try {
+    const res = await fetch(`${backendUrl}/source/trace?metric=${currentMetric}`);
+    if (res.ok) {
+      latestSource = await res.json();
+      renderSourceInfo();
+      if (latestInterpolation) {
+        renderHeatmap(latestInterpolation);
+      }
+    }
+  } catch (e) {
+    console.error('获取溯源数据失败', e);
+  }
+}
+
+function renderSourceInfo() {
+  const panel = document.getElementById('sourceTracePanel');
+  if (!latestSource || !latestSource.found) {
+    panel.innerHTML = `<div style="color:rgba(255,255,255,0.5);text-align:center;padding:10px;font-size:12px;">数据不足，正在分析污染源...</div>`;
+    return;
+  }
+
+  const metricNames = { pm25: 'PM2.5', co2: 'CO₂', temperature: '温度', humidity: '湿度' };
+  const confidencePct = (latestSource.confidence * 100).toFixed(0);
+  const confColor = latestSource.confidence > 0.6 ? '#4caf50' : latestSource.confidence > 0.3 ? '#ffc107' : '#f44336';
+
+  panel.innerHTML = `
+    <div class="source-info">
+      <div class="source-info-row"><span>🎯 追踪指标</span><strong>${metricNames[latestSource.metric]}</strong></div>
+      <div class="source-info-row"><span>📍 推测位置</span><strong>(${latestSource.x.toFixed(1)}m, ${latestSource.y.toFixed(1)}m)</strong></div>
+      <div class="source-info-row"><span>🔋 源强度</span><strong>${latestSource.strength.toFixed(1)}</strong></div>
+      <div class="source-info-row"><span>📊 置信度</span><strong style="color:${confColor}">${confidencePct}%</strong></div>
+    </div>
+    <div style="font-size:11px;color:rgba(255,255,255,0.5);text-align:center;">
+      基于梯度下降的反向溯源算法
+    </div>
+  `;
 }
 
 async function fetchSensors() {
@@ -619,8 +823,43 @@ function renderHeatmap(data) {
         data: [0],
         zlevel: 5,
         silent: true
-      }
-    ]
+      },
+      latestSource && latestSource.found ? {
+        name: '推测污染源',
+        type: 'effectScatter',
+        data: [{
+          value: [latestSource.x, latestSource.y, latestSource.strength],
+          name: '污染源'
+        }],
+        symbolSize: 35,
+        symbol: 'path://M12 2l2.39 7.36H22l-6.19 4.5L18.18 21 12 16.27 5.82 21l2.37-7.14L2 9.36h7.61z',
+        itemStyle: {
+          color: '#ffd700',
+          borderColor: '#ff8c00',
+          borderWidth: 2,
+          shadowBlur: 25,
+          shadowColor: 'rgba(255, 215, 0, 0.9)'
+        },
+        label: {
+          show: true,
+          formatter: '⚠ 污染源',
+          position: 'top',
+          color: '#ffd700',
+          fontSize: 12,
+          fontWeight: 'bold',
+          backgroundColor: 'rgba(0,0,0,0.6)',
+          padding: [3, 8],
+          borderRadius: 4,
+          distance: 12
+        },
+        rippleEffect: {
+          brushType: 'stroke',
+          scale: 4,
+          period: 3
+        },
+        zlevel: 20
+      } : null
+    ].filter(Boolean)
   };
 
   chart.setOption(option, true);

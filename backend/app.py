@@ -25,6 +25,7 @@ from interpolation.kriging import (
     AGING_DECAY_RATE,
     AGING_WEIGHT_THRESHOLD,
 )
+from interpolation.source_trace import trace_pollution_source
 
 
 class SensorReading(BaseModel):
@@ -50,6 +51,39 @@ class MQTTConfig(BaseModel):
     enabled: bool = False
 
 
+class AlertRule(BaseModel):
+    id: str
+    name: str
+    metric: str = Field(pattern="^(pm25|co2|temperature|humidity)$")
+    operator: str = Field(pattern="^(>|<|>=|<=|==)$")
+    threshold: float
+    consecutive_count: int = Field(default=3, ge=1, le=10)
+    enabled: bool = True
+
+
+class AlertRuleCreate(BaseModel):
+    name: str
+    metric: str = Field(pattern="^(pm25|co2|temperature|humidity)$")
+    operator: str = Field(pattern="^(>|<|>=|<=|==)$")
+    threshold: float
+    consecutive_count: int = Field(default=3, ge=1, le=10)
+    enabled: bool = True
+
+
+class AlertEvent(BaseModel):
+    rule_id: str
+    rule_name: str
+    metric: str
+    operator: str
+    threshold: float
+    actual_value: float
+    sensor_id: str
+    sensor_name: str
+    consecutive_hits: int
+    timestamp: str
+
+
+
 class AppState:
     def __init__(self):
         self.sensors: Dict[str, Dict] = {}
@@ -60,6 +94,10 @@ class AppState:
         self.mqtt_client = None
         self.simulator = None
         self.sensor_last_update: Dict[str, datetime] = {}
+        self.alert_rules: Dict[str, Dict] = {}
+        self.consecutive_counters: Dict[str, Dict[str, int]] = {}
+        self.alert_events: List[Dict] = []
+        self._alert_rule_id_seq = 0
 
     def update_sensor(self, reading: SensorReading) -> None:
         if reading.timestamp is None:
@@ -80,6 +118,95 @@ class AppState:
             return []
         weights = self.get_aging_weights(all_ids)
         return [sid for sid, w in zip(all_ids, weights) if w >= AGING_WEIGHT_THRESHOLD]
+
+    def _next_rule_id(self) -> str:
+        self._alert_rule_id_seq += 1
+        return f"rule_{self._alert_rule_id_seq:04d}"
+
+    def add_alert_rule(self, rule: AlertRuleCreate) -> Dict:
+        rule_id = self._next_rule_id()
+        rule_dict = rule.model_dump()
+        rule_dict["id"] = rule_id
+        rule_dict["created_at"] = datetime.now().isoformat()
+        self.alert_rules[rule_id] = rule_dict
+        return rule_dict
+
+    def update_alert_rule(self, rule_id: str, update: AlertRuleCreate) -> Optional[Dict]:
+        if rule_id not in self.alert_rules:
+            return None
+        self.alert_rules[rule_id].update(update.model_dump())
+        self.alert_rules[rule_id]["id"] = rule_id
+        return self.alert_rules[rule_id]
+
+    def delete_alert_rule(self, rule_id: str) -> bool:
+        if rule_id in self.alert_rules:
+            del self.alert_rules[rule_id]
+            return True
+        return False
+
+    @staticmethod
+    def _compare(value: float, operator: str, threshold: float) -> bool:
+        if operator == ">":
+            return value > threshold
+        if operator == "<":
+            return value < threshold
+        if operator == ">=":
+            return value >= threshold
+        if operator == "<=":
+            return value <= threshold
+        if operator == "==":
+            return abs(value - threshold) < 1e-6
+        return False
+
+    def check_alert_rules(self) -> List[Dict]:
+        triggered: List[Dict] = []
+        now = datetime.now().isoformat()
+
+        for rule_id, rule in self.alert_rules.items():
+            if not rule.get("enabled", True):
+                continue
+            metric = rule["metric"]
+            operator = rule["operator"]
+            threshold = rule["threshold"]
+            required = rule.get("consecutive_count", 3)
+            rule_name = rule.get("name", rule_id)
+
+            if rule_id not in self.consecutive_counters:
+                self.consecutive_counters[rule_id] = {}
+
+            for sid, sensor in self.sensors.items():
+                value = sensor.get(metric)
+                if value is None:
+                    continue
+                is_violation = self._compare(value, operator, threshold)
+                counter_key = sid
+
+                if is_violation:
+                    current = self.consecutive_counters[rule_id].get(counter_key, 0) + 1
+                    self.consecutive_counters[rule_id][counter_key] = current
+
+                    if current >= required:
+                        event = {
+                            "rule_id": rule_id,
+                            "rule_name": rule_name,
+                            "metric": metric,
+                            "operator": operator,
+                            "threshold": threshold,
+                            "actual_value": float(value),
+                            "sensor_id": sid,
+                            "sensor_name": sensor.get("name", sid),
+                            "consecutive_hits": current,
+                            "timestamp": now,
+                        }
+                        triggered.append(event)
+                        self.consecutive_counters[rule_id][counter_key] = 0
+                        self.alert_events.insert(0, event)
+                        if len(self.alert_events) > 100:
+                            self.alert_events.pop()
+                else:
+                    self.consecutive_counters[rule_id][counter_key] = 0
+
+        return triggered
 
 
 state = AppState()
@@ -415,6 +542,133 @@ async def get_room_config():
         "unit": "meters",
         "description": "20m x 20m 室内平面",
     }
+
+
+@app.get("/source/trace")
+async def trace_source(
+    metric: str = Query(
+        default="pm25",
+        pattern="^(pm25|co2|temperature|humidity)$",
+    ),
+):
+    sensors = list(state.sensors.values())
+    if len(sensors) < 2:
+        return {
+            "found": False,
+            "message": "传感器数量不足，无法溯源",
+            "x": ROOM_WIDTH / 2,
+            "y": ROOM_HEIGHT / 2,
+            "strength": 0,
+            "confidence": 0,
+            "metric": metric,
+        }
+
+    sensor_ids = list(state.sensors.keys())
+    weights = state.get_aging_weights(sensor_ids)
+
+    active_sensors = [s for s, w in zip(sensors, weights) if w >= AGING_WEIGHT_THRESHOLD]
+    active_weights = [w for w in weights if w >= AGING_WEIGHT_THRESHOLD]
+
+    if len(active_sensors) < 2:
+        active_sensors = sensors
+        active_weights = None
+
+    result = trace_pollution_source(
+        sensors=active_sensors,
+        metric=metric,
+        sensor_weights=active_weights,
+    )
+    result["found"] = result["confidence"] > 0.1
+    return result
+
+
+@app.get("/alerts/rules")
+async def get_alert_rules():
+    return {"rules": list(state.alert_rules.values()), "count": len(state.alert_rules)}
+
+
+@app.post("/alerts/rules")
+async def create_alert_rule(rule: AlertRuleCreate):
+    created = state.add_alert_rule(rule)
+    return {"status": "success", "rule": created}
+
+
+@app.put("/alerts/rules/{rule_id}")
+async def update_alert_rule(rule_id: str, rule: AlertRuleCreate):
+    updated = state.update_alert_rule(rule_id, rule)
+    if not updated:
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return {"status": "success", "rule": updated}
+
+
+@app.delete("/alerts/rules/{rule_id}")
+async def delete_alert_rule(rule_id: str):
+    if not state.delete_alert_rule(rule_id):
+        raise HTTPException(status_code=404, detail="规则不存在")
+    return {"status": "success"}
+
+
+@app.get("/alerts/events")
+async def get_alert_events(limit: int = 50):
+    events = state.alert_events[:limit]
+    return {"events": events, "count": len(events)}
+
+
+@app.get("/alerts/check")
+async def check_alerts():
+    triggered = state.check_alert_rules()
+    return {"triggered": triggered, "count": len(triggered)}
+
+
+@app.post("/alerts/reset")
+async def reset_alert_counters():
+    state.consecutive_counters.clear()
+    state.alert_events.clear()
+    return {"status": "success"}
+
+
+def _seed_default_alert_rules():
+    if len(state.alert_rules) > 0:
+        return
+    defaults = [
+        AlertRuleCreate(
+            name="PM2.5严重超标",
+            metric="pm25",
+            operator=">",
+            threshold=75.0,
+            consecutive_count=3,
+            enabled=True,
+        ),
+        AlertRuleCreate(
+            name="CO₂超标警告",
+            metric="co2",
+            operator=">",
+            threshold=1000.0,
+            consecutive_count=3,
+            enabled=True,
+        ),
+        AlertRuleCreate(
+            name="温度过高",
+            metric="temperature",
+            operator=">",
+            threshold=28.0,
+            consecutive_count=3,
+            enabled=True,
+        ),
+        AlertRuleCreate(
+            name="湿度过高",
+            metric="humidity",
+            operator=">",
+            threshold=60.0,
+            consecutive_count=3,
+            enabled=True,
+        ),
+    ]
+    for rule in defaults:
+        state.add_alert_rule(rule)
+
+
+_seed_default_alert_rules()
 
 
 if __name__ == "__main__":
