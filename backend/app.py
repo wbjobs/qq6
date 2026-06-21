@@ -16,7 +16,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import uvicorn
 
-from interpolation.kriging import KrigingInterpolator, ROOM_WIDTH, ROOM_HEIGHT
+from interpolation.kriging import (
+    KrigingInterpolator,
+    ROOM_WIDTH,
+    ROOM_HEIGHT,
+    compute_aging_weights,
+    AGING_GRACE_PERIOD,
+    AGING_DECAY_RATE,
+    AGING_WEIGHT_THRESHOLD,
+)
 
 
 class SensorReading(BaseModel):
@@ -51,6 +59,27 @@ class AppState:
         self.mqtt_enabled = False
         self.mqtt_client = None
         self.simulator = None
+        self.sensor_last_update: Dict[str, datetime] = {}
+
+    def update_sensor(self, reading: SensorReading) -> None:
+        if reading.timestamp is None:
+            reading.timestamp = datetime.now().isoformat()
+        self.sensors[reading.id] = reading.model_dump()
+        self.sensor_last_update[reading.id] = datetime.now()
+
+    def get_aging_weights(self, sensor_ids: List[str]) -> List[float]:
+        timestamps = [
+            self.sensors[sid].get("timestamp") if sid in self.sensors else None
+            for sid in sensor_ids
+        ]
+        return compute_aging_weights(timestamps)
+
+    def get_active_sensor_ids(self) -> List[str]:
+        all_ids = list(self.sensors.keys())
+        if not all_ids:
+            return []
+        weights = self.get_aging_weights(all_ids)
+        return [sid for sid, w in zip(all_ids, weights) if w >= AGING_WEIGHT_THRESHOLD]
 
 
 state = AppState()
@@ -111,9 +140,7 @@ async def get_sensor(sensor_id: str):
 
 @app.post("/sensors")
 async def add_sensor(reading: SensorReading):
-    if reading.timestamp is None:
-        reading.timestamp = datetime.now().isoformat()
-    state.sensors[reading.id] = reading.model_dump()
+    state.update_sensor(reading)
     return {"status": "success", "sensor": state.sensors[reading.id]}
 
 
@@ -121,9 +148,7 @@ async def add_sensor(reading: SensorReading):
 async def add_sensors_batch(batch: SensorBatch):
     added = []
     for reading in batch.sensors:
-        if reading.timestamp is None:
-            reading.timestamp = datetime.now().isoformat()
-        state.sensors[reading.id] = reading.model_dump()
+        state.update_sensor(reading)
         added.append(reading.id)
     return {"status": "success", "added_count": len(added), "added_ids": added}
 
@@ -131,6 +156,7 @@ async def add_sensors_batch(batch: SensorBatch):
 @app.post("/sensors/clear")
 async def clear_sensors():
     state.sensors.clear()
+    state.sensor_last_update.clear()
     return {"status": "success", "message": "所有传感器数据已清除"}
 
 
@@ -155,7 +181,7 @@ async def import_sensors_csv(file: UploadFile = File(...)):
                     humidity=float(row["humidity"]),
                     timestamp=row.get("timestamp") or datetime.now().isoformat(),
                 )
-                state.sensors[reading.id] = reading.model_dump()
+                state.update_sensor(reading)
                 added += 1
             except (KeyError, ValueError) as e:
                 continue
@@ -189,7 +215,12 @@ async def interpolate(
             "resolution": resolution,
             "sensors_count": 0,
             "sensors": [],
+            "aging_weights": [],
+            "active_sensors": [],
         }
+
+    sensor_ids = list(state.sensors.keys())
+    aging_weights = state.get_aging_weights(sensor_ids)
 
     positions = [(s["x"], s["y"]) for s in sensors]
     values = [s[metric] for s in sensors]
@@ -200,12 +231,21 @@ async def interpolate(
         resolution=resolution,
         room_width=ROOM_WIDTH,
         room_height=ROOM_HEIGHT,
+        aging_weights=aging_weights,
     )
+
+    active_sensor_ids = state.get_active_sensor_ids()
+    active_sensors = [
+        {**s, "aging_weight": w, "is_active": sid in active_sensor_ids}
+        for s, sid, w in zip(sensors, sensor_ids, aging_weights)
+    ]
 
     result["metric"] = metric
     result["resolution"] = resolution
     result["sensors_count"] = len(sensors)
-    result["sensors"] = sensors
+    result["sensors"] = active_sensors
+    result["aging_weights"] = aging_weights
+    result["active_sensors"] = active_sensor_ids
 
     return result
 
@@ -226,7 +266,12 @@ async def get_point_value(
             "humidity": 0.0,
         }
 
-    result = state.interpolator.interpolate_all_metrics(x, y, sensors)
+    sensor_ids = list(state.sensors.keys())
+    aging_weights = state.get_aging_weights(sensor_ids)
+
+    result = state.interpolator.interpolate_all_metrics(
+        x, y, sensors, aging_weights=aging_weights
+    )
     result["x"] = x
     result["y"] = y
     return result
@@ -292,13 +337,15 @@ async def run_simulator_loop(interval: float):
     sensors_cfg = state.simulator.get_default_sensors()
     for sid, scfg in sensors_cfg.items():
         initial = state.simulator.generate_reading(sid)
-        state.sensors[sid] = initial
+        reading = SensorReading(**initial)
+        state.update_sensor(reading)
 
     while state.simulator_running:
         try:
             for sid in sensors_cfg:
-                reading = state.simulator.generate_reading(sid)
-                state.sensors[sid] = reading
+                raw = state.simulator.generate_reading(sid)
+                reading = SensorReading(**raw)
+                state.update_sensor(reading)
             await asyncio.sleep(interval)
         except asyncio.CancelledError:
             break
@@ -322,16 +369,12 @@ async def set_mqtt_config(config: MQTTConfig):
                     payload = json.loads(msg.payload.decode())
                     if isinstance(payload, dict):
                         reading = SensorReading(**payload)
-                        if reading.timestamp is None:
-                            reading.timestamp = datetime.now().isoformat()
-                        state.sensors[reading.id] = reading.model_dump()
+                        state.update_sensor(reading)
                     elif isinstance(payload, list):
                         for item in payload:
                             try:
                                 reading = SensorReading(**item)
-                                if reading.timestamp is None:
-                                    reading.timestamp = datetime.now().isoformat()
-                                state.sensors[reading.id] = reading.model_dump()
+                                state.update_sensor(reading)
                             except Exception:
                                 pass
                 except Exception as e:

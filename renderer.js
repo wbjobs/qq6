@@ -13,10 +13,10 @@ const ROOM_WIDTH = 20;
 const ROOM_HEIGHT = 20;
 
 const metricConfig = {
-  pm25: { name: 'PM2.5', unit: 'μg/m³', min: 0, max: 150, color: '#ff6b6b' },
-  co2: { name: 'CO₂', unit: 'ppm', min: 400, max: 2000, color: '#ffa502' },
-  temperature: { name: '温度', unit: '°C', min: 15, max: 35, color: '#ff4757' },
-  humidity: { name: '湿度', unit: '%', min: 20, max: 80, color: '#1e90ff' }
+  pm25: { name: 'PM2.5', unit: 'μg/m³', min: 0, max: 150, color: '#ff6b6b', scaleMin: 0, scaleMax: 500 },
+  co2: { name: 'CO₂', unit: 'ppm', min: 400, max: 2000, color: '#ffa502', scaleMin: 0, scaleMax: 2000 },
+  temperature: { name: '温度', unit: '°C', min: 15, max: 35, color: '#ff4757', scaleMin: 10, scaleMax: 40 },
+  humidity: { name: '湿度', unit: '%', min: 20, max: 80, color: '#1e90ff', scaleMin: 0, scaleMax: 100 }
 };
 
 const thresholds = {
@@ -186,6 +186,22 @@ async function fetchSensors() {
       data.forEach(s => {
         sensorData[s.id] = s;
       });
+
+      const interpRes = await fetch(
+        `${backendUrl}/interpolate?metric=${currentMetric}&resolution=${currentResolution}`
+      );
+      if (interpRes.ok) {
+        const interpData = await interpRes.json();
+        if (interpData.sensors && interpData.aging_weights) {
+          interpData.sensors.forEach((s, idx) => {
+            if (sensorData[s.id]) {
+              sensorData[s.id].is_active = s.is_active;
+              sensorData[s.id].aging_weight = s.aging_weight;
+            }
+          });
+        }
+      }
+
       updateSensorList();
       checkAlerts(data);
     }
@@ -317,11 +333,18 @@ function updateSensorList() {
     return;
   }
 
-  list.innerHTML = sensors.map(s => `
+  list.innerHTML = sensors.map(s => {
+    const isActive = s.is_active !== false;
+    const agingWeight = s.aging_weight !== undefined ? s.aging_weight : 1.0;
+    const weightPercent = (agingWeight * 100).toFixed(0);
+    const offlineTag = isActive ? '' : ' <span style="color:#f44336;font-size:10px;">⚠离线</span>';
+    const weightStyle = agingWeight < 0.5 ? 'color:#f44336;' : agingWeight < 1.0 ? 'color:#ffc107;' : '';
+
+    return `
     <div class="sensor-item" onclick="focusSensor('${s.id}')">
       <div class="sensor-header">
-        <span class="sensor-name">📍 ${s.name}</span>
-        <span class="sensor-coord">(${s.x}m, ${s.y}m)</span>
+        <span class="sensor-name">📍 ${s.name}${offlineTag}</span>
+        <span class="sensor-coord">(${s.x}m, ${s.y}m) <span style="${weightStyle}">${weightPercent}%</span></span>
       </div>
       <div class="sensor-readings">
         <div class="reading">PM2.5: <span class="reading-value ${getValueClass('pm25', s.pm25)}">${s.pm25.toFixed(1)}</span></div>
@@ -329,8 +352,8 @@ function updateSensorList() {
         <div class="reading">温度: <span class="reading-value ${getValueClass('temperature', s.temperature)}">${s.temperature.toFixed(1)}</span></div>
         <div class="reading">湿度: <span class="reading-value ${getValueClass('humidity', s.humidity)}">${s.humidity.toFixed(1)}</span></div>
       </div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
 }
 
 window.focusSensor = function(id) {
@@ -346,7 +369,7 @@ window.focusSensor = function(id) {
 
 function renderHeatmap(data) {
   const cfg = metricConfig[currentMetric];
-  const { grid, min_val, max_val, sensors } = data;
+  const { grid, min_val, max_val, sensors, aging_weights } = data;
 
   const heatmapData = [];
   const n = grid.length;
@@ -365,7 +388,9 @@ function renderHeatmap(data) {
 
   const sensorPoints = sensors.map(s => ({
     value: [s.x, s.y, s[currentMetric]],
-    name: s.name
+    name: s.name,
+    is_active: s.is_active !== false,
+    aging_weight: s.aging_weight !== undefined ? s.aging_weight : 1.0
   }));
 
   const option = {
@@ -375,9 +400,12 @@ function renderHeatmap(data) {
         if (params.seriesName === '传感器') {
           const s = sensorData[params.data.name];
           if (s) {
+            const statusTag = params.data.is_active ? '' : ' ⚠️离线';
+            const weightStr = (params.data.aging_weight * 100).toFixed(0);
             return `<div style="padding:8px;">
-              <b>${s.name}</b><br/>
+              <b>${s.name}${statusTag}</b><br/>
               位置: (${s.x}m, ${s.y}m)<br/>
+              数据权重: ${weightStr}%<br/>
               PM2.5: ${s.pm25.toFixed(1)} μg/m³<br/>
               CO₂: ${s.co2.toFixed(0)} ppm<br/>
               温度: ${s.temperature.toFixed(1)} °C<br/>
@@ -416,8 +444,8 @@ function renderHeatmap(data) {
       bottom: '12%'
     },
     visualMap: {
-      min: Math.floor(min_val),
-      max: Math.ceil(max_val),
+      min: cfg.scaleMin,
+      max: cfg.scaleMax,
       calculable: true,
       orient: 'vertical',
       right: 10,
